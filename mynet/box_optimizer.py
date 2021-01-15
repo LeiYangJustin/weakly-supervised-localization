@@ -86,7 +86,6 @@ all are numpy ndarray
 """
 def generate_bbox_and_lcc(image, bar):
     bar = int(image.max()*bar)
-
     ret,thresh1 = cv2.threshold(image,bar,255,cv2.THRESH_BINARY)
     lcc_img = largest_component(thresh1)
     contours, _ = cv2.findContours(lcc_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE) ## contours [N, 1, 2]
@@ -119,7 +118,7 @@ class BoxOptimizer():
         lcc_contour_list = []
         max_length = 0
         for bmask in batch_mask:
-            box, lcc_contour = generate_bbox_and_lcc(np.array(bmask), 0.5)
+            box, lcc_contour = generate_bbox_and_lcc(np.array(bmask), bar=self.contour_thres)
             batch_box.append(torch.from_numpy(box))
             lcc_contour_list.append(torch.from_numpy(lcc_contour))
             max_length = len(lcc_contour)

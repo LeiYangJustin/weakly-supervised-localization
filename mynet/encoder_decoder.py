@@ -220,8 +220,8 @@ class EDModel(nn.Module):
         h = self.avg_pool(x).reshape(B, self.output_dim)        ## class logits: [B, K]
         
         if gt_label is None:
-            return h, attns
-            
+            gt_label = h.max(dim=1)[1] ## get index
+
         ## reconstruction
         reversed_list = feature_list[::-1] ## reversed list
         memory = self.embeddings(gt_label)

@@ -106,7 +106,7 @@ def evaluate_EDModel(em_model, data_loader, device, draw_path=None, use_conf=Fal
     acc_avg = AverageMeter()
     drawer = Drawer()
 
-    box_optimizer = BoxOptimizer(batch_size=1)
+    box_optimizer = BoxOptimizer(batch_size=1, max_iter=30)
 
 
     for batch_idx, batch in tqdm(
@@ -127,7 +127,7 @@ def evaluate_EDModel(em_model, data_loader, device, draw_path=None, use_conf=Fal
             image_ids = batch[-1]
 
             ## run forward pass
-            batch_size, _, W, H = data.shape
+            batch_size, _, H, W = data.shape
             out = em_model.forward(data, gt_lbls)                
             obj_logits, obj_attns, obj_masks = out[:3]
             alphas = out[-1]
@@ -151,47 +151,37 @@ def evaluate_EDModel(em_model, data_loader, device, draw_path=None, use_conf=Fal
         if draw_path is not None:
             ## get cam
             preds = torch.max(obj_logits, dim=-1)[1]
-            # cam = obj_attns[preds.item()]
-            # max_val = torch.max(cam)
-            # min_val = torch.min(cam)
-            # print(max_val, min_val)
             cam = alphas[:, 0]
             cam = F.interpolate(cam.unsqueeze(0), size=(W, H), mode='nearest').squeeze(0)
-            # images = F.interpolate(images, size=cam.shape[1:], mode='nearest')
 
             ## normalize the cam    
             max_val = torch.max(cam)
             min_val = torch.min(cam)
-            # input()
             cam = (cam - min_val) / (max_val - min_val)
 
-            ## extract box from cam
-            cam = torch.where(cam>0.5, torch.tensor(1.0), torch.tensor(0.0))
+            ## convert to opencv data
+            cam_numpy = cam.permute(1,2,0).cpu().numpy() ## [1, H, W] --> [H, W, 1] OPENCV DATA
+            cam_numpy = np.uint8(cam_numpy*255)
+            ret,cam_numpy = cv2.threshold(cam_numpy,128,255,cv2.THRESH_BINARY)
 
             ## convert to heatmap image
-            cam_numpy = cam.permute(1,2,0).numpy()
             for _ in range(5):
                 cam_numpy = skimg_morph.binary_dilation(cam_numpy)
                 cam_numpy = skimg_morph.binary_closing(cam_numpy)
                 cam_numpy = skimg_morph.binary_erosion(cam_numpy)
 
-            cam_numpy = cam_numpy*255
-            cam_numpy = np.uint8(cam_numpy)
-
-            box_cam_numpy = cam_numpy.reshape(1, 224, 224)
-            box = box_optimizer(box_cam_numpy)[0]
+            cam_numpy = np.uint8(cam_numpy*255)
+            box = box_optimizer(cam_numpy.reshape(1, H, W))[0]
             box = box.detach().cpu()
             x = int(box[0,0]*W)
             y = int(box[0,1]*H)
             w = int(box[0,2]*W)
             h = int(box[0,3]*H)
-            # print(box)
-            # print(x,y,w,h)
 
             cam_numpy = cv2.applyColorMap(cam_numpy, cv2.COLORMAP_JET)
             # cv2.imwrite("cam.png", cam_numpy)
 
-            recon_img_numpy = obj_masks[0].permute(1,2,0).numpy()
+            recon_img_numpy = obj_masks[0].permute(1,2,0).cpu().numpy()
             recon_img_numpy = recon_img_numpy*255
             recon_img_numpy = np.uint8(recon_img_numpy)
             img_numpy = images[0].permute(1,2,0).numpy()

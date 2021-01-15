@@ -6,15 +6,17 @@ import torch.nn.functional as F
 import numpy as np
 import scipy
 import torchvision.ops as tvops
+import skimage.morphology as skimg_morph
+import cv2
 
 import os
 import argparse
 from datetime import datetime
 from mynet import StreamingDataloader 
-from mynet import MyNet, EDModel
-from utils import Drawer
+from mynet import MyNet, EDModel, BoxOptimizer
+from utils import Drawer, read_json
 import box_finder
-from utils import *
+
 
 BOX_SCORE_THRESHOLD = 0.2
 
@@ -153,7 +155,71 @@ class Detector(object):
 
 
 
+class NewDetector(object):
+    def __init__(self, model, data_loader, device):
+        self.model = model
+        self.data_loader = data_loader
+        self.device = device
+        self.box_optimizer = BoxOptimizer(batch_size=1, max_iter=30)
 
+
+    def __call__(self, image_path, draw_path):
+        with torch.no_grad():
+            batch = self.data_loader(image_path)
+            data = batch[0].to(self.device)
+            image = batch[-1]
+            H, W = data.shape[-2:]
+            out = self.model(data.unsqueeze(0), None)
+            obj_logits, _, obj_masks = out[:3]
+            
+            ## mask
+            alphas = out[-1]
+            pred = torch.max(obj_logits, dim=-1)[1]
+
+
+        ## NUMPY DATA ON CPU
+        if draw_path is not None:
+            ## get cam
+            ## alphas [1, 1, H0, W0] -> cam [1, H, W]  
+            cam = F.interpolate(alphas, size=(H, W), mode='nearest').squeeze(0)
+
+            ## normalize the cam    
+            max_val = torch.max(cam)
+            min_val = torch.min(cam)
+            cam = (cam - min_val) / (max_val - min_val)
+
+            ## convert to opencv data
+            cam_numpy = cam.permute(1,2,0).cpu().numpy() ## [1, H, W] --> [H, W, 1] OPENCV DATA
+            cam_numpy = np.uint8(cam_numpy*255)
+            ret, cam_numpy = cv2.threshold(cam_numpy,128,255,cv2.THRESH_BINARY)
+
+            ## convert to heatmap image
+            for _ in range(5):
+                cam_numpy = skimg_morph.binary_dilation(cam_numpy)
+                cam_numpy = skimg_morph.binary_closing(cam_numpy)
+                cam_numpy = skimg_morph.binary_erosion(cam_numpy)
+
+            cam_numpy = np.uint8(cam_numpy*255)
+            box = self.box_optimizer(cam_numpy.reshape(1, H, W))[0]
+            box = box.detach().cpu()
+            x = int(box[0,0]*W)
+            y = int(box[0,1]*H)
+            w = int(box[0,2]*W)
+            h = int(box[0,3]*H)
+
+            cam_numpy = cv2.applyColorMap(cam_numpy, cv2.COLORMAP_JET)
+            cam_numpy = cv2.cvtColor(cam_numpy, cv2.COLOR_RGB2BGR)
+
+            img_numpy = image.permute(1,2,0).numpy()
+
+            label, path = image_path.split('/')[-2:]
+            image_id = path.split('.')[0] ## str
+            img = Drawer.draw_heatmap(cam_numpy, img_numpy)
+            img = np.uint8(img)
+            cv2.rectangle(img, (x, y), (x+w, y+h), (0, 0, 255), 2, cv2.LINE_AA)
+            filename = os.path.join(draw_path, "test_{}_{}.png".format(image_id, pred.item()))
+            cv2.imwrite(filename, img)
+            
 
 
 
@@ -181,7 +247,7 @@ def main(resume, use_cuda=False, use_augment=False):
         print("data are augmented randomly")
 
     ## dataloader
-    data_loader = StreamingDataloader(imwidth=224)
+    data_loader = StreamingDataloader(imwidth=256)
 
     ## CNN model
     output_dim = 3
@@ -195,7 +261,7 @@ def main(resume, use_cuda=False, use_augment=False):
     print(model)
 
     ## init a detector
-    detector = Detector(model, data_loader, device)
+    detector = NewDetector(model, data_loader, device)
     
     # ## perform detection
     # """
@@ -215,9 +281,14 @@ def main(resume, use_cuda=False, use_augment=False):
     files.sort(key=lambda x: x[5:-4])
     image_paths = files
 
-    for p in image_paths:
-        # image_path = './IMG_20210108_135254.jpg'
+    for idx, p in tqdm(
+        enumerate(image_paths), 
+        total=len(image_paths),
+        ncols = 80,
+        desc= f'detection',
+        ):
         detector(p, draw_path=save_path)
+        
     
 
 ## main
