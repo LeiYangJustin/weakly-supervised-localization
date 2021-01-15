@@ -25,7 +25,7 @@ class StreamingDataloader(object):
         ## data pre-processing
         self.normalize = transforms.Normalize(mean=[0.5084, 0.4224, 0.3769],
                                          std=[0.2599, 0.2371, 0.2323])
-        self.initial_transforms = transforms.Compose([transforms.Resize(self.imwidth)])
+        self.initial_transforms = transforms.Compose([transforms.Resize((self.imwidth, self.imwidth))])
         self.to_tensor = transforms.ToTensor()
 
     def __call__(self, image_path):

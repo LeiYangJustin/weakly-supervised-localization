@@ -167,15 +167,15 @@ class NewDetector(object):
         with torch.no_grad():
             batch = self.data_loader(image_path)
             data = batch[0].to(self.device)
-            image = batch[-1]
+            image = batch[1]
+            orig_image = batch[2]
+
             H, W = data.shape[-2:]
             out = self.model(data.unsqueeze(0), None)
-            obj_logits, _, obj_masks = out[:3]
-            
-            ## mask
+            obj_logits = out[0]
             alphas = out[-1]
+            ## mask
             pred = torch.max(obj_logits, dim=-1)[1]
-
 
         ## NUMPY DATA ON CPU
         if draw_path is not None:
@@ -200,6 +200,7 @@ class NewDetector(object):
                 cam_numpy = skimg_morph.binary_erosion(cam_numpy)
 
             cam_numpy = np.uint8(cam_numpy*255)
+            
             box = self.box_optimizer(cam_numpy.reshape(1, H, W))[0]
             box = box.detach().cpu()
             x = int(box[0,0]*W)
@@ -207,18 +208,25 @@ class NewDetector(object):
             w = int(box[0,2]*W)
             h = int(box[0,3]*H)
 
-            cam_numpy = cv2.applyColorMap(cam_numpy, cv2.COLORMAP_JET)
-            cam_numpy = cv2.cvtColor(cam_numpy, cv2.COLOR_RGB2BGR)
+            print(x, y, w, h)
 
+            cam_numpy = cv2.applyColorMap(cam_numpy, cv2.COLORMAP_JET)
             img_numpy = image.permute(1,2,0).numpy()
 
+            img = Drawer.draw_heatmap(cam_numpy, img_numpy)
+            
             label, path = image_path.split('/')[-2:]
             image_id = path.split('.')[0] ## str
-            img = Drawer.draw_heatmap(cam_numpy, img_numpy)
+            img = cam_numpy*0.5 + img_numpy*0.3
             img = np.uint8(img)
+
+            ## draw box
             cv2.rectangle(img, (x, y), (x+w, y+h), (0, 0, 255), 2, cv2.LINE_AA)
-            filename = os.path.join(draw_path, "test_{}_{}.png".format(image_id, pred.item()))
+
+            ## write out
+            filename = os.path.join(draw_path, "{}_{}.png".format(image_id, pred.item()))
             cv2.imwrite(filename, img)
+
             
 
 
@@ -262,24 +270,16 @@ def main(resume, use_cuda=False, use_augment=False):
 
     ## init a detector
     detector = NewDetector(model, data_loader, device)
-    
-    # ## perform detection
-    # """
-    # real-time feeding the image path to the detector
-    # """
-    # data_folder = '../test_detection/'
-    # paths = [
-    #     'H001.png',
-    #     'H002.png',
-    #     'H003.png',
-    #     'H004.png',
-    #     'H005.png'
-    # ]
-    
-    test_path = './metadata/test_images.json'
-    files = read_json(test_path)
-    files.sort(key=lambda x: x[5:-4])
-    image_paths = files
+    # detector(image_path='test_crop.jpg', draw_path=save_path)
+
+    image_paths = [
+        'photo/20210115_165622_rgb.png',
+        'photo/20210115_165633_rgb.png',
+        'photo/20210115_165652_rgb.png',
+        'photo/20210115_165717_rgb.png',
+        'photo/20210115_165725_rgb.png',
+        'photo/20210115_165732_rgb.png',
+    ]
 
     for idx, p in tqdm(
         enumerate(image_paths), 
