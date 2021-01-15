@@ -4,16 +4,20 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F 
 import numpy as np
-
+import skimage.morphology as skimg_morph
 
 import os
 import argparse
 from datetime import datetime
 from mynet import SeqDataset 
-from mynet import MyNet
+# from mynet import MyNet
+from mynet import EDModel 
+from mynet import BoxOptimizer
 from torch.utils.data import DataLoader
 from utils import AverageMeter, Drawer
+from iodine_like import RefineNetLSTM, SBD, IODINE
 
+import cv2
 
 
 def evaluate(model, data_loader, device, draw_path=None, use_conf=False):
@@ -82,14 +86,133 @@ def evaluate(model, data_loader, device, draw_path=None, use_conf=False):
                 img_numpy = images[0].permute(1,2,0).numpy()
                 filename = os.path.join(draw_path, f"test_{image_ids[0]}_{preds.item():d}_{weights.item():4.2f}")
                 drawer.draw_heatmap(cam_numpy, img_numpy, filename)
-     
-            # print(image_ids[0])
-            # print("out: ", out)
-            # print("weights: ", weights)
-            # input()
 
     return {"loss": loss_avg.avg, "acc": acc_avg.avg}
     # print("test loss: ", loss_avg.avg)
+
+
+
+
+
+def evaluate_EDModel(em_model, data_loader, device, draw_path=None, use_conf=False):
+
+    ## set model
+    em_model.eval()
+    em_model = em_model.to(device)
+
+    ## loss
+    criterion = nn.CrossEntropyLoss(reduction='none')
+    loss_avg = AverageMeter()
+    acc_avg = AverageMeter()
+    drawer = Drawer()
+
+    box_optimizer = BoxOptimizer(batch_size=1)
+
+
+    for batch_idx, batch in tqdm(
+        enumerate(data_loader), 
+        total=len(data_loader),
+        ncols = 80,
+        desc= f'testing',
+        ):
+
+        # if batch_idx > 50:
+        #     break
+
+        with torch.no_grad():
+            data = batch[0].to(device)
+            gt_lbls = batch[1].to(device)
+            gt_gt_lbls = batch[2].to(device)
+            images = batch[-2]
+            image_ids = batch[-1]
+
+            ## run forward pass
+            batch_size, _, W, H = data.shape
+            out = em_model.forward(data, gt_lbls)                
+            obj_logits, obj_attns, obj_masks = out[:3]
+            alphas = out[-1]
+
+            preds = torch.max(obj_logits, dim=-1)[1]
+
+            ## compute loss
+            class_loss = criterion(obj_logits, gt_lbls) ## [B, 1]
+            if use_conf:
+                weights = em_model.compute_entropy_weight(obj_logits)
+                loss = (class_loss * (weights**2) + (1-weights)**2).mean()
+            else:
+                loss = class_loss.mean()
+
+            ## record
+            loss_avg.update(loss.item(), batch_size)
+            positive = ((gt_lbls == preds) + (gt_gt_lbls>2)).sum()
+            batch_acc = positive.to(torch.float)/batch_size
+            acc_avg.update(batch_acc.item(), batch_size)
+
+        if draw_path is not None:
+            ## get cam
+            preds = torch.max(obj_logits, dim=-1)[1]
+            # cam = obj_attns[preds.item()]
+            # max_val = torch.max(cam)
+            # min_val = torch.min(cam)
+            # print(max_val, min_val)
+            cam = alphas[:, 0]
+            cam = F.interpolate(cam.unsqueeze(0), size=(W, H), mode='nearest').squeeze(0)
+            # images = F.interpolate(images, size=cam.shape[1:], mode='nearest')
+
+            ## normalize the cam    
+            max_val = torch.max(cam)
+            min_val = torch.min(cam)
+            # input()
+            cam = (cam - min_val) / (max_val - min_val)
+
+            ## extract box from cam
+            cam = torch.where(cam>0.5, torch.tensor(1.0), torch.tensor(0.0))
+
+            ## convert to heatmap image
+            cam_numpy = cam.permute(1,2,0).numpy()
+            for _ in range(5):
+                cam_numpy = skimg_morph.binary_dilation(cam_numpy)
+                cam_numpy = skimg_morph.binary_closing(cam_numpy)
+                cam_numpy = skimg_morph.binary_erosion(cam_numpy)
+
+            cam_numpy = cam_numpy*255
+            cam_numpy = np.uint8(cam_numpy)
+
+            box_cam_numpy = cam_numpy.reshape(1, 224, 224)
+            box = box_optimizer(box_cam_numpy)[0]
+            box = box.detach().cpu()
+            x = int(box[0,0]*W)
+            y = int(box[0,1]*H)
+            w = int(box[0,2]*W)
+            h = int(box[0,3]*H)
+            # print(box)
+            # print(x,y,w,h)
+
+            cam_numpy = cv2.applyColorMap(cam_numpy, cv2.COLORMAP_JET)
+            # cv2.imwrite("cam.png", cam_numpy)
+
+            recon_img_numpy = obj_masks[0].permute(1,2,0).numpy()
+            recon_img_numpy = recon_img_numpy*255
+            recon_img_numpy = np.uint8(recon_img_numpy)
+            img_numpy = images[0].permute(1,2,0).numpy()
+
+            cam_img_numpy = cam_numpy*0.3 + img_numpy*0.5
+            cam_img_numpy = np.uint8(cam_img_numpy)
+            cam_img_numpy = cv2.cvtColor(cam_img_numpy, cv2.COLOR_RGB2BGR)
+            cv2.rectangle(cam_img_numpy, (x, y), (x+w, y+h), (0, 0, 255), 2, cv2.LINE_AA)
+
+
+            filename = os.path.join(draw_path, f"test_{image_ids[0]}_{preds.item():d}_{weights.item():4.2f}")
+            # drawer.draw_heatmap(cam_numpy, img_numpy, filename)
+            drawer.draw_src_and_reconstructed_image(cam_img_numpy, recon_img_numpy, filename)
+
+    
+
+    return {"loss": loss_avg.avg, "acc": acc_avg.avg}
+    # print("test loss: ", loss_avg.avg)
+
+
+
 
 
 
@@ -119,14 +242,13 @@ def main(resume, use_cuda=False, use_augment=False):
 
 
     ## dataloader
-    # test_path = './metadata/test_images.json'
-    new_test_path = './metadata/new_test_images.json'
+    test_path = './metadata/test_images.json'
+    # new_test_path = './metadata/new_test_images.json'
     dataset = SeqDataset(
         phase='test', 
         do_augmentations=use_augment,
-        metafile_path = new_test_path)
+        metafile_path = test_path)
 
-        
     data_loader = DataLoader(
         dataset,
         batch_size=1,
@@ -138,14 +260,16 @@ def main(resume, use_cuda=False, use_augment=False):
 
     ## CNN model
     output_dim = 3
-    model = MyNet(output_dim)
+    model = EDModel(output_dim)
     ## resume a ckpt
-    checkpoint = torch.load(resume)
-    model.load_state_dict(checkpoint['state_dict'])
+    checkpoint = torch.load(resume, map_location=device)
+    model.load_state_dict(checkpoint['state_dict'], strict=False)
+
+    # evaluate
+    # log = evaluate(model, data_loader, device, draw_path=save_path, use_conf=True)
+    log = evaluate_EDModel(model, data_loader, device, draw_path=save_path, use_conf=True)
 
 
-    ## evaluate
-    log = evaluate(model, data_loader, device, draw_path=save_path, use_conf=True)
     print("val loss: ", log['loss'])
     print("val acc: ", log['acc'])
 

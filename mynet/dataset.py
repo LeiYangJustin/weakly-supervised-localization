@@ -63,7 +63,8 @@ class SeqDataset(Dataset):
         self, phase='train', imwidth=224, 
         metafile_path = None,
         do_augmentations=False, img_ext='.png',
-        return_gt_label=True
+        return_gt_label=True,
+        return_box=False
         ):
         
         ## parameters
@@ -73,6 +74,7 @@ class SeqDataset(Dataset):
         self.train = True if phase != 'test' else False
         self.do_augmentations = do_augmentations
         self.return_gt_label = return_gt_label
+        self.return_box = return_box
 
         ## read image paths
         if metafile_path is None:
@@ -91,6 +93,15 @@ class SeqDataset(Dataset):
         print("data set size: ", len(self.image_paths))
 
         
+        if self.return_box:
+            box_paths = read_json(f'./metadata/edge_box_{phase}.json')
+            self.box_dict = {}
+            for bp in box_paths:
+                label, path = bp.split('/')[-2:]
+                image_id = path.split('.')[0][:-4] ## str
+                self.box_dict[image_id] = bp
+
+
         ## data pre-processing
         self.normalize = transforms.Normalize(mean=[0.5084, 0.4224, 0.3769],
                                          std=[0.2599, 0.2371, 0.2323])
@@ -98,7 +109,7 @@ class SeqDataset(Dataset):
         self.augmentations = transforms.RandomApply(
                     [
                         transforms.ColorJitter(brightness=.1, contrast=.1, saturation=.1, hue=0.01),
-                        transforms.RandomAffine(degrees=45,translate=(0.1,0.1),scale=(0.9,1.2))
+                        # transforms.RandomAffine(degrees=45,translate=(0.1,0.1),scale=(0.9,1.2))
                     ], 
                     p=0.3)
         self.to_tensor = transforms.ToTensor()
@@ -106,7 +117,6 @@ class SeqDataset(Dataset):
 
     def __len__(self):
         return len(self.image_paths)
-
 
     def __getitem__(self, index):
         image_path = self.image_paths[index]
@@ -119,14 +129,31 @@ class SeqDataset(Dataset):
 
         label, path = image_path.split('/')[-2:]
         image_id = path.split('.')[0] ## str
-        if self.return_gt_label:
+        
+        
+        if self.return_gt_label and self.return_box:
+            assert label in self.classes
+            n = len(self.classes[label])
+            rand_idx = torch.randperm(n)[0]
+            target = self.classes[label][rand_idx]
+
+            box_path = self.box_dict[image_id]
+            boxes = read_json(box_path)[image_id]
+            boxes = torch.tensor(boxes)
+            boxes_float = boxes[:50, :] ## 50/200
+            
+            return data, target, self.classes_str.index(label), image, image_id, boxes_float
+        
+        elif self.return_gt_label:
             assert label in self.classes
             n = len(self.classes[label])
             rand_idx = torch.randperm(n)[0]
             target = self.classes[label][rand_idx]
             return data, target, self.classes_str.index(label), image, image_id
+            
         else:
-            return data, image, image_id        
+            return data, image, image_id
+
 
 
 if __name__ == '__main__':

@@ -30,7 +30,8 @@ class StreamingDataloader(object):
 
     def __call__(self, image_path):
         image = Image.open(image_path)
+        orig_image = TF.pil_to_tensor(image)
         image = self.initial_transforms(image.convert("RGB")) ## to PIL.rgb
         image = TF.pil_to_tensor(image) ## save the image tensor for visualization
         data = self.normalize(self.to_tensor(TF.to_pil_image(image)))
-        return data, image
+        return data, image, orig_image

@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F 
-
 import torchvision.models as models
 
 
@@ -85,6 +84,7 @@ class MyNet(nn.Module):
             hc = hc.reshape(1, C, 1)
             a = (hc * x).sum(dim=1)
             a = F.gumbel_softmax(a, dim=-1)
+            # a = F.softmax(a, dim=-1)
             activations.append(a.reshape(B, H, W))
         return torch.stack(activations, dim=1)
 
@@ -94,3 +94,42 @@ class MyNet(nn.Module):
         return entropy_weight
 
 
+class Decoder(nn.Module):
+    def __init__(self, up_chl_list = [512, 256, 64], regression=4):
+        super(Decoder, self).__init__()
+
+        self.regression = regression
+        self.conv_up_list = nn.ModuleList()
+        
+        idx0 = up_chl_list[0]
+        for idx1 in up_chl_list[1:]:
+            ## idx0 -> idx1: channel size change
+            ## stride = 2: upsample by 2
+            self.conv_up_list.append(nn.ConvTransposed2d(idx0, idx1, kernel_size=3, stride=2, padding=1, bias=False))
+            idx0 = idx1
+
+        if self.regression is not None:
+            self.regression_head = nn.Conv1d(up_chl_list[-1]+3, regression, kernel_size=1)
+
+        
+    """
+    h0: final feature map
+    h1: second last feature map
+    x: image
+    """
+    def forward(self, feature_list, image):
+        feature_list = feature_list + image
+        ## upsampling
+        for idx, conv_up in enumerate(self.conv_up_list):
+            if idx != 0:
+                h = h + feature_list[idx]
+            h = conv_up(feature_list[idx])
+
+        if self.regression is None:
+            return h
+        else:
+            return self.regression_head(h)
+
+        
+
+            

@@ -62,7 +62,6 @@ class SimpleLogger(object):
 
 
 class Drawer:
-        
     @staticmethod
     def normalize_data_to_img255(data):
         min_val = np.amin(data)
@@ -103,7 +102,7 @@ class Drawer:
 
 
     @staticmethod
-    def draw_heatmap(data, src, path=None):
+    def draw_heatmap(data, src, path=None, normalized=False):
         reshape_size = src.shape
         data = Drawer.resize_image(data, (reshape_size[1],reshape_size[0]))
         heatmap = Drawer.normalize_data_to_img255(data)
@@ -115,19 +114,34 @@ class Drawer:
         else:
             Drawer.cv_write_numpy_to_image(img, path)
 
+    
+    @staticmethod
+    def draw_src_and_reconstructed_image(src, recon, path=None):
+        reshape_size = src.shape
+        recon = Drawer.resize_image(recon, (reshape_size[1],reshape_size[0]))
+        img = np.concatenate([src, recon], axis=0)
+        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        if path is None:
+            return img
+        else:
+            Drawer.cv_write_numpy_to_image(img, path)
+
 
 
     @staticmethod
-    def draw_boxes_on_image(boxes, data, cids, path=None):
+    def draw_boxes_on_image(boxes, data, cids, path=None, convert=False):
         """
         data: numpy array
         boxes: list of size [N, [4]]; or numpy array of shape [N, 4]
         """
         print("IN DRAWING ", boxes.shape)
-        colors = [(0,0,255), (0,255,0), (255,0,0)]
+        colors = [(0,0,255), (0,255,0), (255,0,0), (128,128,128)]
         thickness = 2
         ## convert to cv.UMat
-        img = cv2.cvtColor(data, cv2.COLOR_RGB2BGR) 
+        if convert:
+            img = cv2.cvtColor(data, cv2.COLOR_RGB2BGR) 
+        else:
+            img = data.copy()
         for idx, box in zip(cids, boxes):
             tl = box[:2]
             br = box[2:]
