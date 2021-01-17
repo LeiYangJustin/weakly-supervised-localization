@@ -176,7 +176,7 @@ class EDModel(nn.Module):
         self.decoder = Decoder(up_chl_list=up_chl_list, use_residual_link=True) ## proposal net
         # self.decoder = SBDecoder(512, (64, 64), 4)
 
-        kernel_size, padding = 1, 0
+        kernel_size, padding = 3, 1
         self.rgb_fc = nn.Conv2d(3, 3, kernel_size=kernel_size, padding=padding) ## or kernel_size=5 (no good), 1 (good)
         self.alpha_fc = nn.Conv2d(1, 1, kernel_size=kernel_size, padding=padding)
         

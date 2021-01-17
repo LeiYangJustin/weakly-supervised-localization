@@ -13,7 +13,8 @@ import cv2
 import os
 from datetime import datetime
 import argparse
-from mynet import SeqDataset as Dataset
+# from mynet import SeqDataset as Dataset
+from mynet import MyDataset as Dataset
 from mynet import EDModel
 from utils import AverageMeter, SimpleLogger
 from validation import evaluate_EDModel as evaluate
@@ -120,17 +121,17 @@ def main(config, resume):
         # **loader_kwargs,
     )
 
-    val_dataset = Dataset(phase='val', do_augmentations=False)
-    val_data_loader = DataLoader(
-        val_dataset,
-        batch_size=int(batch_size),
-        num_workers=1,
-        shuffle=True,
-        drop_last=True,
-        pin_memory=True,
-        # **loader_kwargs,
-    )
-
+    # val_dataset = Dataset(phase='val', do_augmentations=False)
+    # val_data_loader = DataLoader(
+    #     val_dataset,
+    #     batch_size=int(batch_size),
+    #     num_workers=1,
+    #     shuffle=True,
+    #     drop_last=True,
+    #     pin_memory=True,
+    #     # **loader_kwargs,
+    # )
+    val_data_loader = None
 
     # ## few shot
     # do_few_shot = False
@@ -151,7 +152,7 @@ def main(config, resume):
 
     ## CNN model
     output_dim = 3
-    model = EDModel(output_dim)
+    model = EDModel(output_dim, resnet_type='resnet34')
     if resume is not None:
         checkpoint = torch.load(resume, map_location=device)
         model.load_state_dict(checkpoint['state_dict'], strict=False)
@@ -172,7 +173,7 @@ def main(config, resume):
     }
     optimizer = torch.optim.Adam(params, **optim_params)
     lr_params = {
-        'milestones':[10],
+        'milestones':[],
         'gamma':0.1,
     }
     lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,**lr_params)
@@ -186,7 +187,7 @@ def main(config, resume):
 
 
     box_thresholds = [0.05, 0.10, 0.15]
-
+    best_idx = 0
 
     ## loop
     for epoch in range(start_epoch, max_epoch):
@@ -314,7 +315,8 @@ def main(config, resume):
             print("val loss: ", log['loss'])
             print("val acc: ", log['acc'])
 
-        best_idx = logger.get_best('val_acc',best='max')
+            best_idx = logger.get_best('val_acc',best='max')
+
         if best_idx == epoch or epoch%10==0:
             print('save ckpt')
             ## save ckpt
