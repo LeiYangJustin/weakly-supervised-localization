@@ -241,3 +241,19 @@ class EDModel(nn.Module):
         #     alpha = torch.cat([object_alphas, bg_alphas], dim=1)
         #     alpha = F.softmax(alpha, dim=1)
         #     return h, attns, object_masks, bg_masks, alpha
+
+    def detect(self, img):
+        feature_list = self.encoder(img)
+        B, C, H, W = feature_list[-1].shape
+        feat = feature_list[-1]
+
+        ## activations
+        x = feat.reshape(B, C, -1) ## [B, C, H, W] -> [B, C, HW]
+        x = self.dropout(x)
+        x = torch.matmul(x.transpose(1,2), self.embeddings.weight.t())   ## [B, HW, K], activation map
+        attns = F.softmax(x, dim=1).permute(2,0,1).reshape(self.output_dim, B, H, W) ## [K, B, H, W]
+
+        ## classification
+        x = x.permute(0,2,1).reshape(B, self.output_dim, H, W)  ## output feature
+        h = self.avg_pool(x).reshape(B, self.output_dim)        ## class logits: [B, K]
+        return h, attns
