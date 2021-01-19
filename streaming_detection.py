@@ -267,6 +267,19 @@ def computePoint2PlaneDistance2(points, plane_func):
     return dist
 
 
+def return_grasping_info(points):
+    # print(points.shape)
+    center = np.mean(points, axis=0)
+    ## subtract center
+    points -= center
+    ## covariance
+    X = np.matmul(np.transpose(points), points)
+    ## PCA
+    eigvals, eigvecs = np.linalg.eig(X)
+    direction = eigvecs[:, eigvals.argmax()]
+    return center, direction 
+
+
 def convertPixelsToXYZ(pixels, depth):
     pixels = pixels.reshape(-1, 2)
     depth = depth.reshape(-1)
@@ -307,6 +320,7 @@ class DepthDetector(object):
 
             ## pred label
             pred = torch.max(obj_logits, dim=-1)[1]
+            confidence = self.model.compute_entropy_weight(obj_logits)
 
             ## cam 
             cam = obj_attns[pred.item()]
@@ -314,7 +328,7 @@ class DepthDetector(object):
             h0, w0 = cam.shape[-2:]
 
             bh, bw = max_pid.floor_divide(w0), max_pid % h0
-            cam_box = [float(bw-1)/w0*W0, float(bh-1)/h0*H0, float(bw+2)/w0*W0, float(bh+2)/h0*H0]
+            cam_box = [float(bw-1.5)/w0*W0, float(bh-1.5)/h0*H0, float(bw+2.5)/w0*W0, float(bh+2.5)/h0*H0]
             if cam_box[0] < 0:
                 cam_box[0] = 0
             if cam_box[1] < 0:
@@ -338,20 +352,26 @@ class DepthDetector(object):
             base_filter_idx = dist > 0.005      ## mm is the unit
             
             ## extract small plane from pc_patch
+            grasp_info = None
             pc_patch_filter_base = pc_patch[base_filter_idx, :]
-            best_eq, best_inliers = self.plane_model.fit(pc_patch_filter_base.copy(), 0.001, maxIteration=100)
-            # plane_pts = pc_patch_filter_base[best_inliers,:]
-            dist = computePoint2PlaneDistance2(pc_patch.copy(), np.array(best_eq).reshape(-1,1))
-            label_idx = dist < 0.003
-            ## draw labelmap
-            label_map = np.zeros((H0, W0))
-            tmp_label = np.zeros((cam_box[3]-cam_box[1], cam_box[2]-cam_box[0])).reshape(-1)
-            tmp_label[label_idx] = pred+1
-            tmp_label = tmp_label.reshape(cam_box[3]-cam_box[1], cam_box[2]-cam_box[0])
-            label_map[cam_box[1]:cam_box[3], cam_box[0]:cam_box[2]] = tmp_label
+            if len(pc_patch_filter_base) > 100:
+                best_eq, best_inliers = self.plane_model.fit(pc_patch_filter_base.copy(), 0.001, maxIteration=100)
+                plane_pts = pc_patch_filter_base[best_inliers,:]
 
-            ## can perform plane update using pca
-            ## finally need to output a region
+                ## return for grasping
+                # grasp_info: [center, direction]
+                # center is the geometric center of the extracted point set
+                # direction is the line to align the two vacuum suction devices
+                grasp_info = return_grasping_info(plane_pts)
+
+                dist = computePoint2PlaneDistance2(pc_patch.copy(), np.array(best_eq).reshape(-1,1))
+                label_idx = dist < 0.003
+                ## draw labelmap
+                label_map = np.zeros((H0, W0))
+                tmp_label = np.zeros((cam_box[3]-cam_box[1], cam_box[2]-cam_box[0])).reshape(-1)
+                tmp_label[label_idx] = pred+1
+                tmp_label = tmp_label.reshape(cam_box[3]-cam_box[1], cam_box[2]-cam_box[0])
+                label_map[cam_box[1]:cam_box[3], cam_box[0]:cam_box[2]] = tmp_label
 
 
             # vcolor = np.transpose(orig_image.reshape(3, -1))
@@ -395,21 +415,24 @@ class DepthDetector(object):
                 cam_depth = cam_numpy*0.2+ depth*0.7
                 cam_depth = cam_depth.astype(np.uint8) ## convert to cv data 
 
-                # label_image = np.repeat(label_map.reshape(H0, W0, 1), 3, axis=-1)
-                # print("LABEL MAP SHAPE", label_image.shape)
-                # print("cam_img SHAPE", cam_img.shape)
-                label_image = skimage.color.label2rgb(label_map, image=depth, bg_label=0)
-                label_image = label_image*255
-                label_image = label_image.astype(np.uint8)
+                if len(pc_patch_filter_base) > 100:
+                    # label_image = np.repeat(label_map.reshape(H0, W0, 1), 3, axis=-1)
+                    # print("LABEL MAP SHAPE", label_image.shape)
+                    # print("cam_img SHAPE", cam_img.shape)
+                    label_image = skimage.color.label2rgb(label_map, image=depth, bg_label=0)
+                    label_image = label_image*255
+                    label_image = label_image.astype(np.uint8)
+                    cat_img = np.concatenate((cam_img, label_image), axis=1)
+                else:
+                    cat_img = np.concatenate((cam_img, cam_depth), axis=1)
 
-                # cv2.rectangle(label_map, (cam_box[0], cam_box[1]), (cam_box[2], cam_box[3]), (0, 255, 255), 2)               
-                cat_img = np.concatenate((cam_img, label_image), axis=1)
+                cv2.putText(cat_img, f'{pred.item()}-{confidence.item():4.4f}', (200,200), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA) 
 
                 filename = os.path.join(draw_path, filename)
                 cv2.imwrite(filename, cat_img)
 
             
-
+            return grasp_info
 
         
 
@@ -456,7 +479,6 @@ def main(resume, use_cuda=False, use_augment=False):
     # detector = NewDetector(model, data_loader, device)
     detector = DepthDetector(model, data_loader, device)
 
-
     metafile = 'metadata/rgbd_conveyor_2021-01-16-19-12-28.json'
     files = read_json(metafile)
     image_paths = []
@@ -471,6 +493,7 @@ def main(resume, use_cuda=False, use_augment=False):
     print("# color images", len(depth_paths))
     
     # foldername = '../rgbd_conveyor_2021-01-16-19-12-28'
+    
     # rgb_path = '1610795560.31780028_c.png'
     # depth_path = '1610795560.38460255_d.png'
 
@@ -481,6 +504,9 @@ def main(resume, use_cuda=False, use_augment=False):
     # # # rgb_path = '1610795568.25693083_c.png'
     # # depth_path = '1610795568.49045515_d.png'
     # # # depth_path = '1610795568.32381868_d.png'
+
+    # rgb_path = '1610795584.33534336_c.png'
+    # depth_path = '1610795584.46876097_d.png'
 
     # rgb_path = os.path.join(foldername, rgb_path)
     # depth_path = os.path.join(foldername, depth_path)
@@ -493,7 +519,7 @@ def main(resume, use_cuda=False, use_augment=False):
         desc= f'detection',
         ):
         print(path)
-        detector(path, depth_paths[idx], draw_path=None)
+        detector(path, depth_paths[idx], draw_path=save_path)
         
     
 

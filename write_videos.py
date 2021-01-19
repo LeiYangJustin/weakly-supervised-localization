@@ -6,7 +6,7 @@ from utils import Drawer
 
 # test_path = 'test_result'
 test_path = 'detection'
-result_name = '2021-01-18_21-30-46'
+result_name = '2021-01-19_11-20-14'
 filepath = f'{test_path}/{result_name}'
 videoname = f'{test_path}/{result_name}/video_{result_name}.avi'
 Drawer.write_video_from_images(filepath, videoname, deleteImg=True)
