@@ -1,4 +1,4 @@
-import selectivesearch
+# import selectivesearch
 import numpy as np
 import skimage.data
 import cv2

@@ -5,3 +5,6 @@ __pycache__
 saved/
 test_result/
 detection/
+
+ckpt
+.idea/

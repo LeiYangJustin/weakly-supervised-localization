@@ -2,6 +2,7 @@ from tqdm import tqdm
 
 import torch 
 import torch.nn as nn
+from torchvision import transforms
 import torch.nn.functional as F 
 import numpy as np
 import scipy
@@ -14,10 +15,13 @@ import pyransac3d as pyrsc
 import os
 import argparse
 from datetime import datetime
+
+from helper import plt_show
 from mynet import StreamingDataloader 
 from mynet import MyNet, EDModel, BoxOptimizer
 from utils import Drawer, read_json
 import box_finder
+import time
 
 
 BOX_SCORE_THRESHOLD = 0.2
@@ -83,8 +87,6 @@ class Detector(object):
             batch = self.data_loader(image_path)
             data = batch[0].to(self.device)
             image = batch[-1]
-
-    
 
             ## run forward pass
             # out = self.model.detection(data.unsqueeze(0)) ## [B,N,H,W]
@@ -277,7 +279,8 @@ def return_grasping_info(points):
     ## PCA
     eigvals, eigvecs = np.linalg.eig(X)
     direction = eigvecs[:, eigvals.argmax()]
-    return center, direction 
+    normal = eigvecs[:, eigvals.argmin()]
+    return center, direction, normal
 
 
 def convertPixelsToXYZ(pixels, depth):
@@ -302,7 +305,126 @@ class DepthDetector(object):
         plane = [-0.02391823687059611, 0.4708401653868865, 0.8818942434348076, -0.3529257165636791]
         self.base_plane = np.array(plane).reshape(-1, 1)
         self.plane_model = pyrsc.Plane()
+        self.imwidth = 224
 
+        self.normalize = transforms.Normalize(mean=[0.5084, 0.4224, 0.3769],
+                                              std=[0.2599, 0.2371, 0.2323])
+        self.initial_transforms = transforms.Compose([transforms.Resize((self.imwidth, self.imwidth))])
+
+    def run_with_cvimg_input(self, rgb_image, depth_image, draw_path=None):
+        with torch.no_grad():
+
+            data = torch.from_numpy(rgb_image).permute(2,0,1)
+            data = data.to(torch.FloatTensor(device=self.device))
+            data = self.normalize(data)
+            data = self.initial_transforms(data)
+
+            print(data)
+
+            H0, W0 = rgb_image.shape[:2]
+            out = self.model.detect(data.unsqueeze(0))
+            obj_logits = out[0]
+            obj_attns = out[1]  ## cam
+
+            ## pred label
+            pred = torch.max(obj_logits, dim=-1)[1]
+            confidence = self.model.compute_entropy_weight(obj_logits)
+
+            ## cam
+            cam = obj_attns[pred.item()]
+            max_pid = torch.argmax(cam)
+            h0, w0 = cam.shape[-2:]
+
+            bh, bw = max_pid.floor_divide(w0), max_pid % h0
+            cam_box = [float(bw - 1.5) / w0 * W0, float(bh - 1.5) / h0 * H0, float(bw + 2.5) / w0 * W0,
+                       float(bh + 2.5) / h0 * H0]
+            if cam_box[0] < 0:
+                cam_box[0] = 0
+            if cam_box[1] < 0:
+                cam_box[1] = 0
+            if cam_box[2] > W0:
+                cam_box[2] = W0
+            if cam_box[3] > H0:
+                cam_box[3] = H0
+            cam_box = np.array(cam_box).astype(np.int)
+
+            ## depth
+            depth = depth_image
+            depth = np.clip(depth, a_min=350, a_max=650)
+            pc = convertPixelsToXYZ(self.np_grid, depth)  ## [N, 3]
+
+
+
+            ## base filtering dist
+            pc_patch = pc.reshape(H0, W0, 3)[cam_box[1]:cam_box[3], cam_box[0]:cam_box[2], :]
+            pc_patch = pc_patch.reshape(-1, 3)
+            dist = computePoint2PlaneDistance2(pc_patch.copy(), self.base_plane)
+            base_filter_idx = dist > 0.005  ## mm is the unit
+
+            ## extract small plane from pc_patch
+            grasp_info = None
+            pc_patch_filter_base = pc_patch[base_filter_idx, :]
+            if len(pc_patch_filter_base) > 100:
+                best_eq, best_inliers = self.plane_model.fit(pc_patch_filter_base.copy(), 0.001, maxIteration=100)
+                plane_pts = pc_patch_filter_base[best_inliers, :]
+
+                ## return for grasping
+                # grasp_info: [center, direction]
+                # center is the geometric center of the extracted point set
+                # direction is the line to align the two vacuum suction devices
+                grasp_info = return_grasping_info(plane_pts)
+
+                dist = computePoint2PlaneDistance2(pc_patch.copy(), np.array(best_eq).reshape(-1, 1))
+                label_idx = dist < 0.003
+                ## draw labelmap
+                label_map = np.zeros((H0, W0))
+                tmp_label = np.zeros((cam_box[3] - cam_box[1], cam_box[2] - cam_box[0])).reshape(-1)
+                tmp_label[label_idx] = pred + 1
+                tmp_label = tmp_label.reshape(cam_box[3] - cam_box[1], cam_box[2] - cam_box[0])
+                label_map[cam_box[1]:cam_box[3], cam_box[0]:cam_box[2]] = tmp_label
+
+            # ------------------------
+            cam = F.interpolate(cam.unsqueeze(0), size=(H0, W0), mode='bilinear').squeeze(0)
+
+            ## cam
+            cam_numpy = cam.detach().cpu().numpy()  ## convert to np
+            cam_numpy = np.expand_dims(cam_numpy.squeeze(0), axis=-1)
+            cam_numpy = np.clip(cam_numpy * 255, a_min=0.0, a_max=255.0)
+            cam_numpy = cam_numpy.astype(np.uint8)  ## convert to cv data
+            cam_numpy = cv2.cvtColor(cam_numpy, cv2.COLOR_RGB2BGR)
+            cam_numpy = cv2.applyColorMap(cam_numpy, cv2.COLORMAP_JET)
+
+            ## cam + color_img
+            cam_img = cam_numpy * 0.5 + rgb_image * 0.3
+            cam_img = cam_img.astype(np.uint8)  ## convert to cv data
+
+            # ## depth
+            depth = (depth.astype(np.float) - depth.min()) / (depth.max() - depth.min())
+            depth = np.clip(depth * 255, a_min=0, a_max=255)
+            depth = depth.astype(np.uint8)
+            depth = cv2.cvtColor(depth, cv2.COLOR_RGB2BGR)
+            cam_depth = cam_numpy * 0.2 + depth * 0.7
+            cam_depth = cam_depth.astype(np.uint8)  ## convert to cv data
+
+            if len(pc_patch_filter_base) > 100:
+                # label_image = np.repeat(label_map.reshape(H0, W0, 1), 3, axis=-1)
+                # print("LABEL MAP SHAPE", label_image.shape)
+                # print("cam_img SHAPE", cam_img.shape)
+                label_image = skimage.color.label2rgb(label_map, image=depth, bg_label=0)
+                label_image = label_image * 255
+                label_image = label_image.astype(np.uint8)
+                cat_img = np.concatenate((cam_img, label_image), axis=1)
+            else:
+                cat_img = np.concatenate((cam_img, cam_depth), axis=1)
+
+            cv2.putText(cat_img, f'{pred.item()}-{confidence.item():4.4f}', (200, 200), cv2.FONT_HERSHEY_SIMPLEX, 1,
+                        (255, 255, 255), 2, cv2.LINE_AA)
+
+            if draw_path is not None:
+                # filename = os.path.join(draw_path, filename)
+                # cv2.imwrite(filename, cat_img)
+                plt_show(cat_img)
+            return grasp_info, cat_img
 
     def __call__(self, image_path, depth_path, draw_path):
         with torch.no_grad():
@@ -374,72 +496,52 @@ class DepthDetector(object):
                 label_map[cam_box[1]:cam_box[3], cam_box[0]:cam_box[2]] = tmp_label
 
 
-            # vcolor = np.transpose(orig_image.reshape(3, -1))
-            # print(pc.shape)
-            # with open("pc.obj", 'w') as f:
-            #     for (v, c) in zip(pc, vcolor):
-            #         f.write(f"v {v[0]} {v[1]} {v[2]} {c[0]} {c[1]} {c[2]}\n")
+            # ------------------------
+            cam = F.interpolate(cam.unsqueeze(0), size=(H0, W0), mode='bilinear').squeeze(0)
 
-            # # # print('pc_patch')
-            # # # with open("pc_patch.obj", 'w') as f:
-            # # #     for v in pc_patch:
-            # # #         f.write(f"v {v[0]} {v[1]} {v[2]}\n")
+            ## cam
+            cam_numpy = cam.detach().cpu().numpy() ## convert to np
+            cam_numpy = np.expand_dims(cam_numpy.squeeze(0), axis=-1)
+            cam_numpy = np.clip(cam_numpy*255, a_min=0.0, a_max=255.0)
+            cam_numpy = cam_numpy.astype(np.uint8) ## convert to cv data
+            cam_numpy = cv2.cvtColor(cam_numpy, cv2.COLOR_RGB2BGR)
+            cam_numpy = cv2.applyColorMap(cam_numpy, cv2.COLORMAP_JET)
 
-            # print('plane_pts')
-            # with open("plane_pts.obj", 'w') as f:
-            #     for v in plane_pts:
-            #         f.write(f"v {v[0]} {v[1]} {v[2]}\n")
+            ## cam + color_img
+            img_numpy = orig_image.permute(1,2,0).numpy()
+            cam_img = cam_numpy*0.5+ img_numpy*0.3
+            cam_img = cam_img.astype(np.uint8) ## convert to cv data
 
+            # ## depth
+            depth = (depth.astype(np.float) - depth.min()) / (depth.max() - depth.min())
+            depth = np.clip(depth*255, a_min=0, a_max=255)
+            depth = depth.astype(np.uint8)
+            depth = cv2.cvtColor(depth, cv2.COLOR_RGB2BGR)
+            cam_depth = cam_numpy*0.2+ depth*0.7
+            cam_depth = cam_depth.astype(np.uint8) ## convert to cv data
+
+            if len(pc_patch_filter_base) > 100:
+                # label_image = np.repeat(label_map.reshape(H0, W0, 1), 3, axis=-1)
+                # print("LABEL MAP SHAPE", label_image.shape)
+                # print("cam_img SHAPE", cam_img.shape)
+                label_image = skimage.color.label2rgb(label_map, image=depth, bg_label=0)
+                label_image = label_image*255
+                label_image = label_image.astype(np.uint8)
+                cat_img = np.concatenate((cam_img, label_image), axis=1)
+            else:
+                cat_img = np.concatenate((cam_img, cam_depth), axis=1)
+
+            cv2.putText(cat_img, f'{pred.item()}-{confidence.item():4.4f}', (200,200), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
 
             if draw_path is not None:
-                cam = F.interpolate(cam.unsqueeze(0), size=(H0, W0), mode='bilinear').squeeze(0)
-
-                ## cam
-                cam_numpy = cam.detach().cpu().numpy() ## convert to np
-                cam_numpy = np.expand_dims(cam_numpy.squeeze(0), axis=-1)
-                cam_numpy = np.clip(cam_numpy*255, a_min=0.0, a_max=255.0)
-                cam_numpy = cam_numpy.astype(np.uint8) ## convert to cv data
-                cam_numpy = cv2.cvtColor(cam_numpy, cv2.COLOR_RGB2BGR)
-                cam_numpy = cv2.applyColorMap(cam_numpy, cv2.COLORMAP_JET)
-
-                ## cam + color_img
-                img_numpy = orig_image.permute(1,2,0).numpy()
-                cam_img = cam_numpy*0.5+ img_numpy*0.3
-                cam_img = cam_img.astype(np.uint8) ## convert to cv data
-
-                # ## depth
-                depth = (depth.astype(np.float) - depth.min()) / (depth.max() - depth.min())
-                depth = np.clip(depth*255, a_min=0, a_max=255)
-                depth = depth.astype(np.uint8)
-                depth = cv2.cvtColor(depth, cv2.COLOR_RGB2BGR)
-                cam_depth = cam_numpy*0.2+ depth*0.7
-                cam_depth = cam_depth.astype(np.uint8) ## convert to cv data 
-
-                if len(pc_patch_filter_base) > 100:
-                    # label_image = np.repeat(label_map.reshape(H0, W0, 1), 3, axis=-1)
-                    # print("LABEL MAP SHAPE", label_image.shape)
-                    # print("cam_img SHAPE", cam_img.shape)
-                    label_image = skimage.color.label2rgb(label_map, image=depth, bg_label=0)
-                    label_image = label_image*255
-                    label_image = label_image.astype(np.uint8)
-                    cat_img = np.concatenate((cam_img, label_image), axis=1)
-                else:
-                    cat_img = np.concatenate((cam_img, cam_depth), axis=1)
-
-                cv2.putText(cat_img, f'{pred.item()}-{confidence.item():4.4f}', (200,200), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA) 
-
                 filename = os.path.join(draw_path, filename)
                 cv2.imwrite(filename, cat_img)
-
-            
-            return grasp_info
-
-        
-
+            else:
+                return grasp_info, cat_img
 
 
 def main(resume, use_cuda=False, use_augment=False):
-    
+    resume ='./ckpt/checkpoint-epoch99.pth'
     ## path
     if True:
         timestamp = datetime.now().strftime(r"%Y-%m-%d_%H-%M-%S")
@@ -479,49 +581,22 @@ def main(resume, use_cuda=False, use_augment=False):
     # detector = NewDetector(model, data_loader, device)
     detector = DepthDetector(model, data_loader, device)
 
-    metafile = 'metadata/rgbd_conveyor_2021-01-16-19-12-28.json'
-    files = read_json(metafile)
-    image_paths = []
-    depth_paths = []
-
-    for idx, f in enumerate(files):
-        if f[-5] == 'c' and files[idx+1][-5] == 'd':
-            image_paths.append(f)
-            depth_paths.append(files[idx+1])
-    
-    print("# color images", len(image_paths))
-    print("# color images", len(depth_paths))
     
     # foldername = '../rgbd_conveyor_2021-01-16-19-12-28'
-    
-    # rgb_path = '1610795560.31780028_c.png'
-    # depth_path = '1610795560.38460255_d.png'
+    data_folder = './test_data'
+    test_data = os.path.join(data_folder, '1610867764.77414274_')
+    rgb_path = test_data + 'c.png'
+    depth_path = test_data + 'd.png'
+    rgb_img = cv2.imread(rgb_path)
+    depth_img = cv2.imread(depth_path, cv2.IMREAD_ANYDEPTH)
+    detector.run_with_cvimg_input(rgb_img ,depth_img, draw_path=save_path)
+    tic = time.time()
+    print(tic)
+    for _ in range(0, 10):
+        detector.run_with_cvimg_input(rgb_img ,depth_img, draw_path=None)
+    toc = time.time()
+    print("time consumption", (toc-tic)/10.)
 
-    # # rgb_path = '1610795580.89956570_c.png'
-    # # depth_path = '1610795581.03297043_d.png'
-
-    # # rgb_path = '1610795568.35703564_c.png'
-    # # # rgb_path = '1610795568.25693083_c.png'
-    # # depth_path = '1610795568.49045515_d.png'
-    # # # depth_path = '1610795568.32381868_d.png'
-
-    # rgb_path = '1610795584.33534336_c.png'
-    # depth_path = '1610795584.46876097_d.png'
-
-    # rgb_path = os.path.join(foldername, rgb_path)
-    # depth_path = os.path.join(foldername, depth_path)
-    # detector(rgb_path, depth_path, draw_path=save_path)
-
-    for idx, path in tqdm(
-        enumerate(image_paths), 
-        total=len(image_paths),
-        ncols = 80,
-        desc= f'detection',
-        ):
-        print(path)
-        detector(path, depth_paths[idx], draw_path=save_path)
-        
-    
 
 ## main
 if __name__ == '__main__':
@@ -533,5 +608,5 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    assert args.resume is not None, "provide ckpt path to try again"
+    # assert args.resume is not None, "provide ckpt path to try again"
     main(args.resume, use_cuda=args.cuda, use_augment=args.augment)

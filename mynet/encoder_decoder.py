@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F 
 import torchvision.models as models
-from mynet.softargmax import SoftArgmax2D
+# from mynet.softargmax import SoftArgmax2D
 import numpy as np
 
 def compute_entropy(scores):
@@ -251,6 +251,7 @@ class EDModel(nn.Module):
         x = feat.reshape(B, C, -1) ## [B, C, H, W] -> [B, C, HW]
         x = self.dropout(x)
         x = torch.matmul(x.transpose(1,2), self.embeddings.weight.t())   ## [B, HW, K], activation map
+        # attns = x.permute(2,0,1).reshape(self.output_dim, B, H, W) ## [K, B, H, W]
         attns = F.softmax(x, dim=1).permute(2,0,1).reshape(self.output_dim, B, H, W) ## [K, B, H, W]
 
         ## classification

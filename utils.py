@@ -148,7 +148,7 @@ class Drawer:
             img = cv2.rectangle(img, tuple(tl), tuple(br), colors[idx], thickness)
         
         print("drawing done")
-        print(img.shape)
+        print(f"img.shape: {img.shape}")
         if path is None:
             return img
         else:
@@ -176,7 +176,7 @@ class Drawer:
                 Drawer.write_text_to_img(img, text)
                 frame_array.append(img)
             
-        print(size)
+        print(f"size: {size}")
         out = cv2.VideoWriter(videoName, cv2.VideoWriter_fourcc(*'DIVX'), 15, size)
         for i in range(len(frame_array)):
             out.write(frame_array[i])
